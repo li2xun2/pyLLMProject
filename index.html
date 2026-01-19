@@ -1,0 +1,412 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>智能客服问答系统</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        .chat-container {
+            height: calc(100vh - 200px);
+        }
+        .message-appear {
+            animation: fadeIn 0.3s ease-in-out;
+        }
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        .typing-indicator span {
+            animation: typing 1.4s infinite;
+            animation-fill-mode: both;
+        }
+        .typing-indicator span:nth-child(2) {
+            animation-delay: 0.2s;
+        }
+        .typing-indicator span:nth-child(3) {
+            animation-delay: 0.4s;
+        }
+        @keyframes typing {
+            0% { opacity: 0.4; }
+            20% { opacity: 1; }
+            100% { opacity: 0.4; }
+        }
+        .scrollbar-thin::-webkit-scrollbar {
+            width: 6px;
+        }
+        .scrollbar-thin::-webkit-scrollbar-track {
+            background: #f1f1f1;
+            border-radius: 3px;
+        }
+        .scrollbar-thin::-webkit-scrollbar-thumb {
+            background: #c1c1c1;
+            border-radius: 3px;
+        }
+        .scrollbar-thin::-webkit-scrollbar-thumb:hover {
+            background: #a1a1a1;
+        }
+    </style>
+</head>
+<body class="bg-gradient-to-br from-blue-50 to-indigo-100 min-h-screen">
+    <div class="container mx-auto px-4 py-8 max-w-4xl">
+        <!-- 头部 -->
+        <div class="bg-white rounded-t-2xl shadow-lg p-6 border-b border-gray-200">
+            <div class="flex items-center justify-between">
+                <div class="flex items-center space-x-4">
+                    <div class="w-12 h-12 bg-gradient-to-br from-blue-500 to-indigo-600 rounded-full flex items-center justify-center">
+                        <svg class="w-6 h-6 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z"></path>
+                        </svg>
+                    </div>
+                    <div>
+                        <h1 class="text-2xl font-bold text-gray-800">智能客服问答系统</h1>
+                        <p class="text-sm text-gray-500">基于 RAG 架构的电商智能客服</p>
+                    </div>
+                </div>
+                <div class="flex items-center space-x-2">
+                    <div class="flex items-center space-x-2 bg-green-100 px-3 py-1 rounded-full">
+                        <div class="w-2 h-2 bg-green-500 rounded-full animate-pulse"></div>
+                        <span class="text-sm text-green-700 font-medium">在线</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 聊天区域 -->
+        <div class="bg-white shadow-lg chat-container overflow-y-auto scrollbar-thin" id="chatContainer">
+            <div class="p-6 space-y-4" id="messageContainer">
+                <!-- 欢迎消息 -->
+                <div class="flex items-start space-x-3 message-appear">
+                    <div class="w-10 h-10 bg-gradient-to-br from-blue-500 to-indigo-600 rounded-full flex items-center justify-center flex-shrink-0">
+                        <svg class="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"></path>
+                        </svg>
+                    </div>
+                    <div class="flex-1">
+                        <div class="bg-gray-100 rounded-2xl rounded-tl-none p-4 max-w-lg">
+                            <p class="text-gray-800 mb-3">您好！我是智能客服助手，很高兴为您服务。我可以帮您查询以下信息：</p>
+                            <div class="space-y-2">
+                                <div class="flex items-center space-x-2 text-sm">
+                                    <span class="bg-blue-100 text-blue-700 px-2 py-1 rounded">FAQ问答</span>
+                                    <span class="text-gray-600">订单、支付、物流、退款等常见问题</span>
+                                </div>
+                                <div class="flex items-center space-x-2 text-sm">
+                                    <span class="bg-green-100 text-green-700 px-2 py-1 rounded">商品查询</span>
+                                    <span class="text-gray-600">商品信息、价格、库存等</span>
+                                </div>
+                                <div class="flex items-center space-x-2 text-sm">
+                                    <span class="bg-purple-100 text-purple-700 px-2 py-1 rounded">订单查询</span>
+                                    <span class="text-gray-600">订单状态、客户信息等</span>
+                                </div>
+                                <div class="flex items-center space-x-2 text-sm">
+                                    <span class="bg-orange-100 text-orange-700 px-2 py-1 rounded">客户查询</span>
+                                    <span class="text-gray-600">客户信息、联系方式等</span>
+                                </div>
+                            </div>
+                            <p class="text-gray-800 mt-3">您可以选择要搜索的数据表，或者直接提问，系统会自动在所有表中搜索。</p>
+                        </div>
+                        <span class="text-xs text-gray-400 mt-1 block">刚刚</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 输入区域 -->
+        <div class="bg-white rounded-b-2xl shadow-lg p-6 border-t border-gray-200">
+            <div class="flex items-end space-x-4">
+                <div class="flex-1 relative">
+                    <textarea 
+                        id="userInput" 
+                        class="w-full border border-gray-300 rounded-xl px-4 py-3 pr-12 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent resize-none transition-all duration-200"
+                        rows="1"
+                        placeholder="请输入您的问题..."
+                        onkeydown="handleKeyDown(event)"
+                    ></textarea>
+                    <div class="absolute right-3 bottom-3 text-gray-400 text-sm">
+                        <span id="charCount">0</span>/500
+                    </div>
+                </div>
+                <button 
+                    onclick="sendMessage()" 
+                    id="sendButton"
+                    class="bg-gradient-to-r from-blue-500 to-indigo-600 text-white px-6 py-3 rounded-xl font-medium hover:from-blue-600 hover:to-indigo-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 transition-all duration-200 flex items-center space-x-2 disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                    <span>发送</span>
+                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8"></path>
+                    </svg>
+                </button>
+            </div>
+            
+            <!-- 快捷问题 -->
+            <div class="mt-4">
+                <p class="text-sm text-gray-500 mb-2">快捷测试：</p>
+                <div class="grid grid-cols-2 gap-3">
+                    <div>
+                        <p class="text-xs text-blue-600 font-medium mb-2">FAQ问答</p>
+                        <div class="flex flex-wrap gap-2">
+                            <button onclick="quickQuestion('如何修改订单地址？', ['faq'])" class="bg-blue-100 hover:bg-blue-200 text-blue-700 px-3 py-1.5 rounded-full text-sm transition-colors duration-200">
+                                如何修改订单地址？
+                            </button>
+                            <button onclick="quickQuestion('支持哪些支付方式？', ['faq'])" class="bg-blue-100 hover:bg-blue-200 text-blue-700 px-3 py-1.5 rounded-full text-sm transition-colors duration-200">
+                                支持哪些支付方式？
+                            </button>
+                        </div>
+                    </div>
+                    <div>
+                        <p class="text-xs text-green-600 font-medium mb-2">商品查询</p>
+                        <div class="flex flex-wrap gap-2">
+                            <button onclick="quickQuestion('iPhone的价格是多少？', ['products'])" class="bg-green-100 hover:bg-green-200 text-green-700 px-3 py-1.5 rounded-full text-sm transition-colors duration-200">
+                                iPhone的价格是多少？
+                            </button>
+                            <button onclick="quickQuestion('有哪些手机产品？', ['products'])" class="bg-green-100 hover:bg-green-200 text-green-700 px-3 py-1.5 rounded-full text-sm transition-colors duration-200">
+                                有哪些手机产品？
+                            </button>
+                        </div>
+                    </div>
+                    <div>
+                        <p class="text-xs text-purple-600 font-medium mb-2">订单查询</p>
+                        <div class="flex flex-wrap gap-2">
+                            <button onclick="quickQuestion('张三的订单状态？', ['orders'])" class="bg-purple-100 hover:bg-purple-200 text-purple-700 px-3 py-1.5 rounded-full text-sm transition-colors duration-200">
+                                张三的订单状态？
+                            </button>
+                            <button onclick="quickQuestion('有哪些已完成的订单？', ['orders'])" class="bg-purple-100 hover:bg-purple-200 text-purple-700 px-3 py-1.5 rounded-full text-sm transition-colors duration-200">
+                                有哪些已完成的订单？
+                            </button>
+                        </div>
+                    </div>
+                    <div>
+                        <p class="text-xs text-orange-600 font-medium mb-2">客户查询</p>
+                        <div class="flex flex-wrap gap-2">
+                            <button onclick="quickQuestion('张三的联系方式？', ['customers'])" class="bg-orange-100 hover:bg-orange-200 text-orange-700 px-3 py-1.5 rounded-full text-sm transition-colors duration-200">
+                                张三的联系方式？
+                            </button>
+                            <button onclick="quickQuestion('北京有哪些客户？', ['customers'])" class="bg-orange-100 hover:bg-orange-200 text-orange-700 px-3 py-1.5 rounded-full text-sm transition-colors duration-200">
+                                北京有哪些客户？
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 状态栏 -->
+        <div class="mt-4 text-center">
+            <p class="text-sm text-gray-500">
+                <span class="font-medium">系统状态：</span>
+                <span id="systemStatus" class="text-green-600">正常运行</span>
+                <span class="mx-2">|</span>
+                <span class="font-medium">响应时间：</span>
+                <span id="responseTime">-</span>
+                <span class="mx-2">|</span>
+                <span class="font-medium">置信度：</span>
+                <span id="confidence">-</span>
+            </p>
+        </div>
+    </div>
+
+    <script>
+        const API_URL = 'http://localhost:8000/ask';
+        const messageContainer = document.getElementById('messageContainer');
+        const userInput = document.getElementById('userInput');
+        const sendButton = document.getElementById('sendButton');
+        const charCount = document.getElementById('charCount');
+        const systemStatus = document.getElementById('systemStatus');
+        const responseTime = document.getElementById('responseTime');
+        const confidence = document.getElementById('confidence');
+
+        userInput.addEventListener('input', function() {
+            const length = this.value.length;
+            charCount.textContent = length;
+            if (length > 500) {
+                this.value = this.value.substring(0, 500);
+                charCount.textContent = 500;
+            }
+        });
+
+        function handleKeyDown(event) {
+            if (event.key === 'Enter' && !event.shiftKey) {
+                event.preventDefault();
+                sendMessage();
+            }
+        }
+
+        function quickQuestion(question, tables = null) {
+            userInput.value = question;
+            charCount.textContent = question.length;
+            sendMessage(tables);
+        }
+
+        function addMessage(content, isUser, confidence = null, source = null, url = null, table = null) {
+            const messageDiv = document.createElement('div');
+            messageDiv.className = 'flex items-start space-x-3 message-appear';
+            
+            if (isUser) {
+                messageDiv.innerHTML = `
+                    <div class="flex-1 flex justify-end">
+                        <div class="bg-gradient-to-r from-blue-500 to-indigo-600 text-white rounded-2xl rounded-tr-none p-4 max-w-lg">
+                            <p>${escapeHtml(content)}</p>
+                        </div>
+                    </div>
+                    <div class="w-10 h-10 bg-gray-300 rounded-full flex items-center justify-center flex-shrink-0">
+                        <svg class="w-5 h-5 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"></path>
+                        </svg>
+                    </div>
+                `;
+            } else {
+                const confidenceHtml = confidence !== null ? 
+                    `<div class="mt-2 flex items-center space-x-2">
+                        <span class="text-xs text-gray-500">置信度:</span>
+                        <div class="flex-1 bg-gray-200 rounded-full h-1.5">
+                            <div class="bg-gradient-to-r from-blue-500 to-indigo-600 h-1.5 rounded-full" style="width: ${confidence * 100}%"></div>
+                        </div>
+                        <span class="text-xs text-gray-600 font-medium">${(confidence * 100).toFixed(1)}%</span>
+                    </div>` : '';
+                
+                const tableHtml = table !== null ? 
+                    `<div class="mt-2 flex items-center space-x-2 text-xs">
+                        <svg class="w-3 h-3 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 7v10c0 2.21 3.79 4 6 4h16c2.21 0 4-1.79 4-4V7c0-2.21-1.79-4-4-4H4c-2.21 0-4 1.79-4 4zm0-4h16v2H4V3h16z"></path>
+                        </svg>
+                        <span class="text-green-600 font-medium">数据表:</span>
+                        <span class="text-gray-600 bg-green-50 px-2 py-0.5 rounded">${escapeHtml(table)}</span>
+                    </div>` : '';
+                
+                const sourceHtml = source !== null ? 
+                    `<div class="mt-2 flex items-center space-x-2 text-xs">
+                        <svg class="w-3 h-3 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1"></path>
+                        </svg>
+                        <span class="text-blue-600 font-medium">来源:</span>
+                        <span class="text-gray-600">${escapeHtml(source)}</span>
+                    </div>` : '';
+                
+                messageDiv.innerHTML = `
+                    <div class="w-10 h-10 bg-gradient-to-br from-blue-500 to-indigo-600 rounded-full flex items-center justify-center flex-shrink-0">
+                        <svg class="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"></path>
+                        </svg>
+                    </div>
+                    <div class="flex-1">
+                        <div class="bg-gray-100 rounded-2xl rounded-tl-none p-4 max-w-lg">
+                            <p class="text-gray-800 whitespace-pre-line">${escapeHtml(content)}</p>
+                            ${confidenceHtml}
+                            ${tableHtml}
+                            ${sourceHtml}
+                        </div>
+                        <span class="text-xs text-gray-400 mt-1 block">刚刚</span>
+                    </div>
+                `;
+            }
+            
+            messageContainer.appendChild(messageDiv);
+            scrollToBottom();
+        }
+
+        function addTypingIndicator() {
+            const typingDiv = document.createElement('div');
+            typingDiv.id = 'typingIndicator';
+            typingDiv.className = 'flex items-start space-x-3 message-appear';
+            typingDiv.innerHTML = `
+                <div class="w-10 h-10 bg-gradient-to-br from-blue-500 to-indigo-600 rounded-full flex items-center justify-center flex-shrink-0">
+                    <svg class="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"></path>
+                    </svg>
+                </div>
+                <div class="flex-1">
+                    <div class="bg-gray-100 rounded-2xl rounded-tl-none p-4">
+                        <div class="typing-indicator flex space-x-1">
+                            <span class="w-2 h-2 bg-gray-400 rounded-full"></span>
+                            <span class="w-2 h-2 bg-gray-400 rounded-full"></span>
+                            <span class="w-2 h-2 bg-gray-400 rounded-full"></span>
+                        </div>
+                    </div>
+                </div>
+            `;
+            messageContainer.appendChild(typingDiv);
+            scrollToBottom();
+        }
+
+        function removeTypingIndicator() {
+            const typingIndicator = document.getElementById('typingIndicator');
+            if (typingIndicator) {
+                typingIndicator.remove();
+            }
+        }
+
+        function scrollToBottom() {
+            const chatContainer = document.getElementById('chatContainer');
+            chatContainer.scrollTop = chatContainer.scrollHeight;
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        async function sendMessage(tables = null) {
+            const question = userInput.value.trim();
+            if (!question) return;
+
+            userInput.value = '';
+            charCount.textContent = '0';
+            sendButton.disabled = true;
+
+            addMessage(question, true);
+            addTypingIndicator();
+
+            const startTime = Date.now();
+
+            try {
+                const requestBody = { question: question };
+                if (tables) {
+                    requestBody.tables = tables;
+                }
+
+                const response = await fetch(API_URL, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify(requestBody)
+                });
+
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+
+                const data = await response.json();
+                const endTime = Date.now();
+                const duration = (endTime - startTime) / 1000;
+
+                removeTypingIndicator();
+                addMessage(data.answer, false, data.confidence, data.source, data.url, data.table);
+
+                systemStatus.textContent = '正常运行';
+                systemStatus.className = 'text-green-600';
+                responseTime.textContent = `${duration.toFixed(2)}秒`;
+                confidence.textContent = `${(data.confidence * 100).toFixed(1)}%`;
+
+            } catch (error) {
+                console.error('Error:', error);
+                removeTypingIndicator();
+                addMessage('抱歉，系统出现错误，请稍后再试。如果问题持续，请联系技术支持。', false);
+
+                systemStatus.textContent = '连接失败';
+                systemStatus.className = 'text-red-600';
+                responseTime.textContent = '-';
+                confidence.textContent = '-';
+            }
+
+            sendButton.disabled = false;
+            userInput.focus();
+        }
+
+        window.onload = function() {
+            userInput.focus();
+        };
+    </script>
+</body>
+</html>

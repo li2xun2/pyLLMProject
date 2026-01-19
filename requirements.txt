@@ -1,0 +1,14 @@
+fastapi==0.128.0
+uvicorn[standard]==0.40.0
+psycopg2-binary==2.9.9
+sentence-transformers==5.2.0
+faiss-cpu==1.13.2
+torch==2.7.1+cu118
+torchvision==0.22.1+cu118
+torchaudio==2.7.1+cu118
+transformers==4.57.3
+pydantic-settings==2.12.0
+numpy==2.2.6
+pillow==12.0.0
+requests==2.31.0
+beautifulsoup4==4.12.2
