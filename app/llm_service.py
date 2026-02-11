@@ -18,6 +18,12 @@ class LLMService:
         try:
             logger.info(f"Loading LLM model: {settings.LLM_MODEL}")
             
+            # 自动检测CUDA是否可用
+            actual_device = settings.LLM_DEVICE
+            if actual_device == "cuda" and not torch.cuda.is_available():
+                actual_device = "cpu"
+                logger.warning("CUDA is not available, falling back to CPU")
+            
             # 加载tokenizer
             logger.info(f"Loading tokenizer from: {settings.LLM_MODEL}")
             self.tokenizer = AutoTokenizer.from_pretrained(
@@ -30,9 +36,10 @@ class LLMService:
             
             # 加载模型
             logger.info(f"Loading model from: {settings.LLM_MODEL}")
+            logger.info(f"Using device: {actual_device}")
             
             # 对于CPU，使用float32以避免精度问题
-            if settings.LLM_DEVICE == "cpu":
+            if actual_device == "cpu":
                 torch_dtype = torch.float32
             else:
                 torch_dtype = torch.float16
@@ -40,7 +47,7 @@ class LLMService:
             self.model = AutoModelForCausalLM.from_pretrained(
                 settings.LLM_MODEL,
                 torch_dtype=torch_dtype,
-                device_map=settings.LLM_DEVICE if settings.LLM_DEVICE != "cuda" else "auto",
+                device_map=actual_device if actual_device != "cuda" else "auto",
                 trust_remote_code=True,
                 local_files_only=True
             )
@@ -49,13 +56,13 @@ class LLMService:
             if "qwen" in settings.LLM_MODEL.lower():
                 logger.info("Applying Qwen-specific optimizations")
                 # 只有在GPU上才使用FP16
-                if settings.LLM_DEVICE == "cuda" and hasattr(self.model, "half") and torch.cuda.is_available():
+                if actual_device == "cuda" and hasattr(self.model, "half") and torch.cuda.is_available():
                     self.model = self.model.half()
             
             # 移动到正确的设备
-            if settings.LLM_DEVICE == "cuda" and torch.cuda.is_available():
+            if actual_device == "cuda" and torch.cuda.is_available():
                 self.model = self.model.cuda()
-            elif settings.LLM_DEVICE == "cpu":
+            elif actual_device == "cpu":
                 self.model = self.model.cpu()
             
             logger.info(f"✓ LLM model loaded successfully")

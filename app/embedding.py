@@ -1,5 +1,6 @@
 from typing import List
 import numpy as np
+import torch
 from sentence_transformers import SentenceTransformer
 from app.config import settings
 
@@ -10,7 +11,11 @@ class EmbeddingModel:
         self._load_model()
     
     def _load_model(self):
-        self.model = SentenceTransformer(settings.EMBEDDING_MODEL, device=settings.EMBEDDING_DEVICE)
+        # Automatically detect if CUDA is available
+        device = settings.EMBEDDING_DEVICE
+        if device == "cuda" and not torch.cuda.is_available():
+            device = "cpu"
+        self.model = SentenceTransformer(settings.EMBEDDING_MODEL, device=device)
     
     def encode(self, texts: List[str]) -> np.ndarray:
         if not texts:

@@ -11,12 +11,12 @@ class Settings(BaseSettings):
     DB_SCHEMA: str = "mall"
     
     EMBEDDING_MODEL: str = "C:/Users/lix/.cache/huggingface/hub/models--BAAI--bge-small-zh-v1.5/snapshots/7999e1d3359715c523056ef9478215996d62a620"
-    EMBEDDING_DEVICE: str = "cpu"
+    EMBEDDING_DEVICE: str = "cuda"
     TOP_K: int = 3
     CONFIDENCE_THRESHOLD: float = 0.5
     
     LLM_MODEL: str = "C:/Users/lix/.cache/huggingface/hub/models--Qwen--Qwen2.5-1.5B-Instruct/snapshots/989aa7980e4cf806f80c7fef2b1adb7bc71aa306"
-    LLM_DEVICE: str = "cpu"
+    LLM_DEVICE: str = "cuda"
     LLM_MAX_LENGTH: int = 512
     LLM_TEMPERATURE: float = 0.7
     USE_LLM: bool = True
