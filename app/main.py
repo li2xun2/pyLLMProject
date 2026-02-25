@@ -209,6 +209,12 @@ async def api_ai_ask(ask_request: AskRequest, user_id: str = Depends(get_optiona
     return await ask_question(ask_request, user_id)
 
 
+@app.post("/ai/ask", response_class=UTF8JSONResponse)
+async def ai_ask(ask_request: AskRequest, user_id: str = Depends(get_optional_user_id)):
+    """AI客服API接口，兼容前端代理路径"""
+    return await ask_question(ask_request, user_id)
+
+
 @app.post("/api/ai/ask/stream")
 async def api_ai_ask_stream(ask_request: AskRequest, user_id: str = Depends(get_optional_user_id)):
     """AI客服流式API接口，与前端调用路径匹配"""
