@@ -94,6 +94,66 @@ class MultiTableVectorStore:
         # 添加新数据
         self.add_table_data(table_name, data, text_columns)
     
+    def add_new_data(self, table_name: str, new_data: List[Dict], text_columns: List[str]):
+        """向现有索引添加新数据"""
+        if table_name not in self._initialized_tables:
+            logger.warning(f"Table '{table_name}' not initialized, use add_table_data instead")
+            return
+        
+        if not new_data:
+            logger.warning(f"No new data provided for table '{table_name}'")
+            return
+        
+        logger.info(f"Processing {len(new_data)} new records for table '{table_name}'")
+        
+        texts = []
+        valid_records = []
+        
+        for row in new_data:
+            # 智能合并文本，添加字段名以提供更多上下文
+            text_parts = []
+            for col in text_columns:
+                value = row.get(col)
+                if value:
+                    # 添加字段名作为前缀，增强语义信息
+                    text_parts.append(f"{col}: {str(value)}")
+            
+            combined_text = ' '.join(text_parts)
+            if combined_text.strip():
+                texts.append(combined_text)
+                valid_records.append(row)
+        
+        if not texts:
+            logger.warning(f"No valid text data found in new records for table '{table_name}'")
+            return
+        
+        logger.info(f"Generating embeddings for {len(texts)} valid new records")
+        try:
+            embeddings = embedding_model.encode(texts)
+            logger.info(f"Embeddings generated successfully: shape={embeddings.shape}")
+        except Exception as e:
+            logger.error(f"Error generating embeddings: {e}")
+            return
+        
+        # 获取现有索引并添加新数据
+        try:
+            index_info = self.indices[table_name]
+            index = index_info['index']
+            
+            # 向现有索引添加新嵌入
+            index.add(embeddings.astype('float32'))
+            logger.info(f"Added {len(valid_records)} new embeddings to index for table '{table_name}'")
+            
+            # 更新数据存储
+            index_info['data'].extend(valid_records)
+            if table_name in self.data:
+                self.data[table_name].extend(new_data)
+            
+            logger.info(f"Successfully added {len(valid_records)} new records to table '{table_name}'")
+        except Exception as e:
+            logger.error(f"Error adding new data to table '{table_name}': {e}")
+            return
+    
     def search(self, query: str, tables: List[str] = None, top_k: int = None) -> List[Tuple[Dict, float, str]]:
         if not self.indices:
             logger.warning("No indices available for search")

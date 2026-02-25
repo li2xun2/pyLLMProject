@@ -1,5 +1,6 @@
 from pydantic_settings import BaseSettings
 from typing import List, Dict
+import json
 
 
 class Settings(BaseSettings):
@@ -21,13 +22,38 @@ class Settings(BaseSettings):
     LLM_TEMPERATURE: float = 0.7
     USE_LLM: bool = True
     
-    VECTOR_TABLES: List[str] = ['ums_member', 'oms_order', 'ums_member_address', 'pms_product']
-    VECTOR_TABLE_CONFIG: Dict[str, List[str]] = {
+    # 默认值
+    _default_vector_tables: List[str] = ['ums_member', 'oms_order', 'ums_member_address', 'pms_product']
+    _default_vector_table_config: Dict[str, List[str]] = {
         'ums_member': ['nickname', 'phone_hidden', 'city', 'province'],
         'oms_order': ['order_sn', 'status', 'receiver_name', 'total_amount'],
         'ums_member_address': ['name', 'phone_hidden', 'province', 'city', 'district', 'detail_address'],
         'pms_product': ['name', 'brand_name', 'product_category_name', 'detail_html']
     }
+    
+    # 实际使用的值，会从数据库加载
+    VECTOR_TABLES: List[str] = _default_vector_tables
+    VECTOR_TABLE_CONFIG: Dict[str, List[str]] = _default_vector_table_config
+    
+    def load_from_db(self, db):
+        """从数据库加载配置"""
+        try:
+            # 尝试从数据库加载配置
+            vector_tables_str = db.get_ai_config("vector_tables")
+            vector_table_config_str = db.get_ai_config("vector_table_config")
+            
+            if vector_tables_str:
+                self.VECTOR_TABLES = json.loads(vector_tables_str)
+            if vector_table_config_str:
+                self.VECTOR_TABLE_CONFIG = json.loads(vector_table_config_str)
+        except Exception as e:
+            # 如果加载失败，使用默认值
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.error(f"Error loading config from database: {e}")
+            logger.info("Using default configuration")
+            self.VECTOR_TABLES = self._default_vector_tables
+            self.VECTOR_TABLE_CONFIG = self._default_vector_table_config
     
     @property
     def DATABASE_URL(self) -> str:

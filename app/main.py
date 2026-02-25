@@ -1,5 +1,5 @@
 from fastapi import FastAPI, Request, Depends, HTTPException
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from contextlib import asynccontextmanager
 from app.rag_engine import rag_engine
@@ -9,7 +9,7 @@ import logging
 import jwt
 import os
 import json
-from typing import Any
+from typing import Any, AsyncGenerator
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -101,6 +101,12 @@ async def lifespan(app: FastAPI):
             logger.info("Database connection test passed")
         else:
             logger.warning("Database connection test failed")
+        
+        # 加载配置
+        logger.info("Loading AI config from database...")
+        from app.config import settings
+        settings.load_from_db(db)
+        logger.info(f"AI config loaded: tables={settings.VECTOR_TABLES}")
         
         # 初始化RAG引擎
         logger.info("Initializing RAG engine...")
@@ -203,6 +209,21 @@ async def api_ai_ask(ask_request: AskRequest, user_id: str = Depends(get_optiona
     return await ask_question(ask_request, user_id)
 
 
+@app.post("/api/ai/ask/stream")
+async def api_ai_ask_stream(ask_request: AskRequest, user_id: str = Depends(get_optional_user_id)):
+    """AI客服流式API接口，与前端调用路径匹配"""
+    async def generate() -> AsyncGenerator[str, None]:
+        async for chunk in rag_engine.ask_stream(ask_request.question, tables=ask_request.tables, user_id=user_id):
+            # 转换为SSE格式
+            yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n"
+        # 结束流
+        yield "data: {\"done\": true}\n"
+        yield "event: end\n"
+        yield "data: {}\n"
+    
+    return StreamingResponse(generate(), media_type="text/event-stream")
+
+
 @app.get("/api/ai/status")
 async def api_ai_status():
     """AI服务状态接口，与前端调用路径匹配"""
@@ -221,6 +242,12 @@ async def api_ai_status():
     except Exception as e:
         logger.error(f"Error getting AI status: {e}")
         return {"status": "unhealthy", "error": str(e)}
+
+
+@app.get("/ai/status")
+async def ai_status():
+    """AI服务状态接口，兼容前端代理路径"""
+    return await api_ai_status()
 
 
 @app.get("/api/history")
@@ -265,6 +292,145 @@ async def get_system_stats():
     except Exception as e:
         logger.error(f"Error getting system stats: {e}")
         return {"status": "error", "message": str(e)}
+
+
+@app.post("/api/ai/refresh")
+async def refresh_ai_index(user_id: str = Depends(get_optional_user_id)):
+    """刷新AI索引，用于管理端手动触发"""
+    try:
+        logger.info(f"Refreshing AI index requested by user: {user_id or 'anonymous'}")
+        # 执行增量更新
+        rag_engine.incremental_update(user_id=user_id)
+        # 获取更新后的状态
+        stats = rag_engine.get_stats()
+        return {
+            "status": "success",
+            "message": "AI索引刷新成功",
+            "stats": stats
+        }
+    except Exception as e:
+        logger.error(f"Error refreshing AI index: {e}")
+        return {
+            "status": "error",
+            "message": f"刷新失败: {str(e)}"
+        }
+
+
+@app.post("/ai/refresh")
+async def ai_refresh(user_id: str = Depends(get_optional_user_id)):
+    """刷新AI索引，兼容前端代理路径"""
+    return await refresh_ai_index(user_id)
+
+
+@app.get("/ai/tables")
+async def ai_tables():
+    """获取所有可用的表及其字段信息，兼容前端代理路径"""
+    return await get_ai_tables()
+
+
+@app.get("/ai/config")
+async def ai_config():
+    """获取当前AI配置，兼容前端代理路径"""
+    return await get_ai_config()
+
+
+@app.post("/ai/config")
+async def ai_update_config(config: dict, user_id: str = Depends(get_optional_user_id)):
+    """更新AI配置，兼容前端代理路径"""
+    return await update_ai_config(config, user_id)
+
+
+@app.get("/api/ai/tables")
+async def get_ai_tables():
+    """获取所有可用的表及其字段信息"""
+    try:
+        from app.database import db
+        all_tables = db.get_all_tables()
+        tables_info = []
+        
+        for table_name in all_tables:
+            columns = db.get_table_columns(table_name)
+            text_columns = [
+                col['column_name'] 
+                for col in columns 
+                if 'text' in col['data_type'].lower() or 
+                   'char' in col['data_type'].lower() or
+                   'varchar' in col['data_type'].lower()
+            ]
+            
+            tables_info.append({
+                'name': table_name,
+                'columns': columns,
+                'text_columns': text_columns
+            })
+        
+        return {
+            "tables": tables_info
+        }
+    except Exception as e:
+        logger.error(f"Error getting tables info: {e}")
+        return {
+            "tables": []
+        }
+
+
+@app.get("/api/ai/config")
+async def get_ai_config():
+    """获取当前AI配置"""
+    try:
+        from app.config import settings
+        return {
+            "vector_tables": settings.VECTOR_TABLES,
+            "vector_table_config": settings.VECTOR_TABLE_CONFIG
+        }
+    except Exception as e:
+        logger.error(f"Error getting AI config: {e}")
+        return {
+            "vector_tables": [],
+            "vector_table_config": {}
+        }
+
+
+@app.post("/api/ai/config")
+async def update_ai_config(config: dict, user_id: str = Depends(get_optional_user_id)):
+    """更新AI配置"""
+    try:
+        logger.info(f"Updating AI config requested by user: {user_id or 'anonymous'}")
+        
+        # 读取当前配置
+        import json
+        import os
+        from app.config import settings
+        from app.database import db
+        
+        # 更新内存中的配置
+        if "vector_tables" in config:
+            settings.VECTOR_TABLES = config["vector_tables"]
+        if "vector_table_config" in config:
+            settings.VECTOR_TABLE_CONFIG = config["vector_table_config"]
+        
+        # 保存配置到数据库
+        db.save_ai_config("vector_tables", json.dumps(settings.VECTOR_TABLES))
+        db.save_ai_config("vector_table_config", json.dumps(settings.VECTOR_TABLE_CONFIG))
+        
+        # 重新初始化RAG引擎
+        from app.rag_engine import rag_engine
+        rag_engine.initialize(user_id)
+        
+        # 获取更新后的状态
+        stats = rag_engine.get_stats()
+        
+        return {
+            "status": "success",
+            "message": "AI配置更新成功",
+            "stats": stats
+        }
+    except Exception as e:
+        logger.error(f"Error updating AI config: {e}")
+        return {
+            "status": "error",
+            "message": f"更新失败: {str(e)}"
+        }
 
 
 @app.get("/api/tables")

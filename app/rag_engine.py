@@ -18,6 +18,11 @@ class MultiTableRAGEngine:
         self.max_history_length = 5
         # 系统提示词
         self.system_prompt = "你是一个专业的商城客服助手，需要根据用户的问题和提供的参考信息，给出准确、简洁、友好的回答。回答要直接针对用户的问题，不要提及'参考信息'等引导性短语。"
+        # 记录上次更新时间，用于增量更新
+        self.last_update_times = {}
+        # 导入datetime模块用于时间戳处理
+        import datetime
+        self.datetime = datetime
     
     def get_conversation_history(self, user_id: Optional[str] = None) -> List[dict]:
         """获取用户的对话历史"""
@@ -82,6 +87,8 @@ class MultiTableRAGEngine:
                     data = db.fetch_table_data(table_name, text_columns, user_id=user_id)
                     if data:
                         multi_vector_store.add_table_data(table_name, data, text_columns)
+                    # 记录初始化时间作为上次更新时间
+                    self.last_update_times[table_name] = self.datetime.datetime.now().isoformat()
             
             self._initialized = True
             stats = multi_vector_store.get_all_stats()
@@ -91,6 +98,71 @@ class MultiTableRAGEngine:
                 logger.info(f"  - {table_name}: {table_stats['size']} records")
         except Exception as e:
             logger.error(f"Error initializing Multi-table RAG Engine: {e}")
+            raise
+    
+    def incremental_update(self, user_id: Optional[str] = None):
+        """增量更新数据，只处理新数据"""
+        if not self._initialized:
+            logger.warning("RAG Engine not initialized, running full initialization instead")
+            self.initialize(user_id)
+            return
+        
+        try:
+            tables = settings.VECTOR_TABLES
+            
+            if not tables:
+                tables = ['faq']
+            
+            total_new_records = 0
+            
+            for table_name in tables:
+                if table_name in settings.VECTOR_TABLE_CONFIG:
+                    text_columns = settings.VECTOR_TABLE_CONFIG[table_name]
+                else:
+                    columns_info = db.get_table_columns(table_name)
+                    text_columns = [
+                        col['column_name'] 
+                        for col in columns_info 
+                        if 'text' in col['data_type'].lower() or 
+                           'char' in col['data_type'].lower() or
+                           'varchar' in col['data_type'].lower()
+                    ]
+                
+                if text_columns:
+                    # 获取上次更新时间
+                    last_update = self.last_update_times.get(table_name, None)
+                    if not last_update:
+                        # 如果没有上次更新时间，使用当前时间作为初始值
+                        last_update = self.datetime.datetime.now().isoformat()
+                    
+                    logger.info(f"Checking for new data in table '{table_name}' since {last_update}")
+                    
+                    # 增量获取新数据
+                    new_data = db.fetch_table_data_since(table_name, text_columns, last_update, user_id=user_id)
+                    
+                    if new_data:
+                        logger.info(f"Found {len(new_data)} new records in table '{table_name}'")
+                        # 向现有索引添加新数据
+                        multi_vector_store.add_new_data(table_name, new_data, text_columns)
+                        total_new_records += len(new_data)
+                    else:
+                        logger.info(f"No new data found in table '{table_name}'")
+                    
+                    # 更新上次更新时间
+                    self.last_update_times[table_name] = self.datetime.datetime.now().isoformat()
+            
+            if total_new_records > 0:
+                stats = multi_vector_store.get_all_stats()
+                total_size = multi_vector_store.get_total_size()
+                logger.info(f"Incremental update completed: {total_new_records} new records added")
+                logger.info(f"Current stats: {len(stats)} tables, {total_size} total records")
+                for table_name, table_stats in stats.items():
+                    logger.info(f"  - {table_name}: {table_stats['size']} records")
+            else:
+                logger.info("Incremental update completed: No new records found")
+                
+        except Exception as e:
+            logger.error(f"Error performing incremental update: {e}")
             raise
     
     def ask(self, question: str, tables: List[str] = None, user_id: Optional[str] = None, conversation_id: Optional[str] = None) -> Dict:
@@ -160,6 +232,201 @@ class MultiTableRAGEngine:
         self.add_to_history(user_id, "assistant", result.get("answer", ""))
         
         return result
+    
+    async def ask_stream(self, question: str, tables: List[str] = None, user_id: Optional[str] = None, conversation_id: Optional[str] = None):
+        """流式处理用户问题并返回回答"""
+        if not self._initialized:
+            self.initialize(user_id)
+        
+        if not question or not question.strip():
+            yield {
+                "text": "请提供有效的问题",
+                "done": True
+            }
+            return
+        
+        # 确保问题是有效的UTF-8
+        try:
+            question = question.encode('utf-8', 'replace').decode('utf-8')
+        except Exception:
+            question = ""
+        
+        # 添加用户问题到对话历史
+        self.add_to_history(user_id, "user", question)
+        
+        question_lower = question.lower()
+        
+        # 优化意图识别关键词
+        query_keywords = ['哪些', '所有', '列表', '全部', '有什么', '有哪些', '多少', '几个', '查询', '查看']
+        is_query_type = any(keyword in question for keyword in query_keywords)
+        
+        # 优化表选择逻辑
+        customer_keywords = ['用户', '客户', '购买者', '消费者', '我', '我的信息', '个人信息', '账号', '个人资料', '会员信息', '注册信息', '登录信息', '我的账号', '我的会员']
+        order_keywords = ['订单', '购买', '交易', '配送', '发货', '我的订单', '物流', '快递', '买过', '购买记录', '历史订单', '订单状态', '订单详情', '我的购买', '购买历史', '已购', '买了什么', '买了哪些', '购买过什么', '购买过哪些', '订单查询', '查订单', '查看订单', '订单列表', '所有订单', '全部订单']
+        product_keywords = ['商品', '产品', '物品', '货物', '库存', '商品信息', '购买商品', '商品详情', '产品信息', '商品价格', '产品价格', '商品库存', '产品库存', '商品规格', '产品规格', '商品属性', '产品属性', '商品分类', '产品分类']
+        address_keywords = ['地址', '收货地址', '我的地址', '地址管理', '收货信息', '地址列表', '添加地址', '修改地址', '删除地址', '默认地址', '地址详情', '我的收货地址']
+        payment_keywords = ['支付', '付款', '账单', '退款', '退换货', '支付方式', '付款方式', '支付失败', '付款失败', '退款申请', '退款流程', '退款状态', '退换货流程', '退换货政策', '退款到账', '退款时间']
+        
+        target_tables = None
+        if any(keyword in question for keyword in order_keywords):
+            target_tables = ['oms_order']
+        elif any(keyword in question for keyword in payment_keywords):
+            target_tables = ['oms_order']
+        elif any(keyword in question for keyword in customer_keywords):
+            target_tables = ['ums_member']
+        elif any(keyword in question for keyword in product_keywords):
+            target_tables = ['pms_product']
+        elif any(keyword in question for keyword in address_keywords):
+            target_tables = ['ums_member_address']
+        else:
+            # 默认搜索用户和订单表
+            target_tables = ['ums_member', 'oms_order']
+        
+        if tables:
+            target_tables = tables
+        
+        logger.info(f"Processing stream question: '{question}' with tables: {target_tables}")
+        
+        if settings.USE_LLM:
+            async for chunk in self._ask_with_llm_stream(question, target_tables, is_query_type, user_id):
+                yield chunk
+        else:
+            # 对于非LLM模式，使用同步回答
+            result = self._ask_without_llm(question, target_tables, is_query_type, user_id)
+            yield {
+                "text": result.get("answer", ""),
+                "done": True
+            }
+    
+    async def _ask_with_llm_stream(self, question: str, target_tables: List[str], is_query_type: bool, user_id: Optional[str] = None):
+        """使用LLM流式处理问题"""
+        # 搜索相关信息
+        results = multi_vector_store.search(question, tables=target_tables, top_k=5)  # 增加搜索结果数量
+        
+        if not results:
+            # 即使没有搜索结果，也尝试使用对话历史回答
+            history = self.get_conversation_history(user_id)
+            if len(history) > 1:
+                # 使用对话历史进行回答
+                try:
+                    messages = [
+                        {"role": "system", "content": self.system_prompt}
+                    ] + history[:-1]  # 排除当前问题
+                    messages.append({"role": "user", "content": question})
+                    
+                    # 构建prompt
+                    prompt = "\n".join([f"{msg['role']}: {msg['content']}" for msg in messages]) + "\nassistant:"
+                    
+                    # 使用流式生成
+                    from app.llm_service import llm_service
+                    async for chunk in llm_service.generate_stream(prompt):
+                        if "error" in chunk:
+                            yield {
+                                "text": chunk["error"],
+                                "done": True
+                            }
+                            return
+                        yield chunk
+                    
+                    # 添加助手回答到对话历史
+                    if "text" in chunk:
+                        self.add_to_history(user_id, "assistant", chunk["text"])
+                    
+                    return
+                except Exception as e:
+                    logger.error(f"Error using conversation history: {e}")
+            
+            yield {
+                "text": "抱歉，未在数据库中找到相关信息。请尝试其他问题或联系客服。",
+                "done": True
+            }
+            return
+        
+        # 提取最相关的表和计算平均置信度
+        table_name = results[0][2]
+        avg_confidence = sum(r[1] for r in results) / len(results)
+        
+        # 构建上下文
+        if is_query_type:
+            # 对于查询类型问题，格式化所有相关结果
+            formatted_results = []
+            seen_results = set()  # 去重
+            
+            for result, confidence, _ in results:
+                formatted = self._format_answer(result, table_name)
+                if formatted and formatted not in seen_results:
+                    seen_results.add(formatted)
+                    formatted_results.append(formatted)
+            
+            if len(formatted_results) == 1:
+                context = formatted_results[0]
+            else:
+                context = '\n\n'.join([f'{i+1}. {result}' for i, result in enumerate(formatted_results[:3])])  # 最多使用3个结果
+        else:
+            # 对于非查询类型问题，使用最相关的结果
+            context = self._format_answer(results[0][0], table_name)
+        
+        if not context or not context.strip():
+            yield {
+                "text": "抱歉，未在数据库中找到相关信息。请尝试其他问题或联系客服。",
+                "done": True
+            }
+            return
+        
+        try:
+            # 构建完整的上下文，包括用户信息和对话历史
+            full_context = ""
+            
+            # 添加用户信息
+            if user_id:
+                user_profile = db.fetch_user_profile(user_id)
+                if user_profile:
+                    user_info = f"用户信息: 昵称={user_profile.get('nickname', '未知')}, 电话={user_profile.get('phone', '未知')}\n"
+                    full_context += user_info
+            
+            # 添加对话历史（最近2轮）
+            history = self.get_conversation_history(user_id)
+            if len(history) > 2:
+                recent_history = history[-3:-1]  # 最近2轮对话
+                history_context = "最近对话:\n"
+                for msg in recent_history:
+                    if msg['role'] == 'user':
+                        history_context += f"用户: {msg['content']}\n"
+                    else:
+                        history_context += f"助手: {msg['content']}\n"
+                full_context += history_context + "\n"
+            
+            # 添加搜索结果
+            full_context += f"参考信息:\n{context}"
+            
+            # 生成回答
+            from app.llm_service import llm_service
+            async for chunk in llm_service.generate_stream(full_context):
+                if "error" in chunk:
+                    yield {
+                        "text": chunk["error"],
+                        "done": True
+                    }
+                    return
+                yield chunk
+            
+            # 添加助手回答到对话历史
+            if "text" in chunk:
+                self.add_to_history(user_id, "assistant", chunk["text"])
+            
+        except Exception as e:
+            logger.error(f"LLM流式生成失败，使用原始答案: {e}")
+            # 使用最相关的结果作为回答
+            formatted_answer = self._format_answer(results[0][0], table_name)
+            formatted_answer = formatted_answer.encode('utf-8', 'replace').decode('utf-8')
+            
+            yield {
+                "text": formatted_answer,
+                "done": True
+            }
+            
+            # 添加助手回答到对话历史
+            self.add_to_history(user_id, "assistant", formatted_answer)
     
     def _ask_with_llm(self, question: str, target_tables: List[str], is_query_type: bool, user_id: Optional[str] = None) -> Dict:
         """使用LLM处理问题，确保正确编码"""
@@ -526,8 +793,9 @@ class MultiTableRAGEngine:
             return '未找到相关信息'
     
     def refresh(self):
-        self._initialized = False
-        self.initialize()
+        """刷新数据，使用增量更新"""
+        logger.info("Refreshing RAG Engine data with incremental update")
+        self.incremental_update()
     
     def get_stats(self) -> Dict:
         return {

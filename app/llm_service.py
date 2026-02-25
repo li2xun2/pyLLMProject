@@ -219,6 +219,149 @@ class LLMService:
             # 返回一个默认的错误消息
             return "抱歉，系统暂时无法生成回答，请稍后再试。"
     
+    async def generate_stream(self, prompt: str, max_length: int = 128, temperature: float = 0.3):
+        """异步流式生成回答"""
+        if not self.model or not self.tokenizer:
+            logger.error("LLM model not loaded")
+            yield {"error": "LLM模型未加载"}
+            return
+        
+        try:
+            logger.info(f"Starting stream generation for prompt: {prompt[:50]}..." if len(prompt) > 50 else f"Starting stream generation for prompt: {prompt}")
+            
+            # 对于Qwen模型，使用其推荐的prompt格式
+            if "qwen" in settings.LLM_MODEL.lower():
+                messages = [
+                    {"role": "system", "content": "你是一个专业的商城客服助手，需要根据用户的问题和提供的参考信息，给出准确、简洁的回答。回答要使用中文。"},
+                    {"role": "user", "content": prompt}
+                ]
+                logger.info("Using Qwen chat template for streaming")
+                
+                # 先检查tokenizer是否有apply_chat_template方法
+                if hasattr(self.tokenizer, 'apply_chat_template'):
+                    logger.info("Tokenizer has apply_chat_template method")
+                    inputs = self.tokenizer.apply_chat_template(
+                        messages,
+                        tokenize=True,
+                        add_generation_prompt=True,
+                        return_tensors="pt"
+                    )
+                    
+                    # 检查inputs的类型
+                    if hasattr(inputs, 'input_ids'):
+                        # BatchEncoding对象
+                        logger.info(f"Chat template applied successfully, input_ids shape: {inputs.input_ids.shape}")
+                        # 直接移动BatchEncoding对象到设备
+                        if hasattr(inputs, 'to'):
+                            inputs = inputs.to(self.model.device)
+                            logger.info(f"BatchEncoding inputs moved to device: {self.model.device}")
+                        else:
+                            # 对于不支持to方法的BatchEncoding，手动移动每个张量
+                            for key, value in inputs.items():
+                                if hasattr(value, 'to'):
+                                    inputs[key] = value.to(self.model.device)
+                            logger.info(f"BatchEncoding inputs items moved to device: {self.model.device}")
+                    else:
+                        # 直接的张量
+                        logger.info(f"Chat template applied successfully, input shape: {inputs.shape}")
+                        inputs = inputs.to(self.model.device)
+                        logger.info(f"Tensor inputs moved to device: {self.model.device}")
+                else:
+                    logger.error("Tokenizer does not have apply_chat_template method")
+                    yield {"error": "抱歉，系统暂时无法生成回答，请稍后再试。"}
+                    return
+            else:
+                logger.info("Using regular tokenization for streaming")
+                inputs = self.tokenizer(prompt, return_tensors="pt")
+                inputs = {k: v.to(self.model.device) for k, v in inputs.items()}
+                logger.info(f"Regular tokenization successful, input keys: {list(inputs.keys())}")
+            
+            logger.info(f"Stream generating with max_length={max_length}, temperature={temperature}")
+            
+            # 准备正确的输入格式
+            model_inputs = inputs
+            if hasattr(inputs, 'input_ids'):
+                # 对于BatchEncoding对象，直接使用input_ids
+                logger.info("Using input_ids from BatchEncoding for streaming")
+                model_inputs = inputs.input_ids
+                logger.info(f"Input_ids shape: {model_inputs.shape}")
+            
+            # 流式生成
+            with torch.no_grad():
+                logger.info("Starting model.generate_stream")
+                
+                # 直接生成完整回答，然后模拟流式输出
+                # 这种方式虽然不是真正的流式生成，但可以避免token级别的错误
+                try:
+                    # 生成完整回答
+                    outputs = self.model.generate(
+                        model_inputs,
+                        max_new_tokens=max_length,
+                        temperature=temperature,
+                        do_sample=temperature > 0,
+                        top_p=0.9,
+                        top_k=50,
+                        repetition_penalty=1.1,
+                        pad_token_id=self.tokenizer.pad_token_id,
+                        eos_token_id=self.tokenizer.eos_token_id
+                    )
+                    
+                    # 解码完整回答
+                    full_output = self.tokenizer.decode(
+                        outputs[0],
+                        skip_special_tokens=True,
+                        clean_up_tokenization_spaces=True
+                    )
+                    
+                    # 对于Qwen模型，需要提取助手的回答
+                    if "qwen" in settings.LLM_MODEL.lower():
+                        # 查找助手标记
+                        if "assistant" in full_output:
+                            assistant_pos = full_output.find("assistant")
+                            full_output = full_output[assistant_pos + len("assistant"):].strip()
+                        elif "Assistant" in full_output:
+                            assistant_pos = full_output.find("Assistant")
+                            full_output = full_output[assistant_pos + len("Assistant"):].strip()
+                    else:
+                        # 对于其他模型，跳过prompt部分
+                        if len(full_output) > len(prompt):
+                            full_output = full_output[len(prompt):].strip()
+                    
+                    # 清理可能的乱码和特殊字符
+                    full_output = self._clean_response(full_output)
+                    
+                    # 确保返回的是有效的UTF-8字符串
+                    full_output = self._ensure_valid_utf8(full_output)
+                    
+                    # 模拟流式输出，逐字返回
+                    current_text = ""
+                    for char in full_output:
+                        current_text += char
+                        yield {
+                            "text": current_text,
+                            "done": False
+                        }
+                        # 添加一个小延迟，模拟真实的流式效果
+                        import asyncio
+                        await asyncio.sleep(0.05)
+                    
+                    # 生成完成
+                    logger.info("Stream generation completed")
+                    yield {
+                        "text": full_output,
+                        "done": True
+                    }
+                except Exception as e:
+                    # 捕获生成过程中的异常
+                    logger.error(f"Error generating full response: {e}")
+                    yield {"error": "抱歉，系统暂时无法生成回答，请稍后再试。"}
+        except Exception as e:
+            logger.error(f"Error in stream generation: {type(e).__name__}: {str(e)}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            # 返回错误消息
+            yield {"error": "抱歉，系统暂时无法生成回答，请稍后再试。"}
+    
     def _clean_response(self, response: str) -> str:
         """清理响应文本，移除乱码和特殊字符"""
         # 移除控制字符
