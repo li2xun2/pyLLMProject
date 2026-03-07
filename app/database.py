@@ -107,6 +107,8 @@ class Database:
                     ORDER BY ordinal_position
                 """, (table_name, settings.DB_SCHEMA))
                 columns = cursor.fetchall()
+                # 将DictCursor对象转换为普通字典
+                columns = [dict(col) for col in columns]
                 logger.info(f"Table {table_name} columns: {[col['column_name'] for col in columns]}")
                 return columns
             finally:
@@ -160,8 +162,11 @@ class Database:
             for row in results:
                 processed_row = {}
                 for col in text_columns:
-                    if col in row and row[col]:
-                        processed_row[col] = str(row[col])
+                    try:
+                        if col in row and row[col] is not None:
+                            processed_row[col] = str(row[col])
+                    except Exception as e:
+                        logger.error(f"Error processing column {col}: {e}")
                 if processed_row:
                     processed_row['_table'] = table_name
                     if user_id:
@@ -238,11 +243,17 @@ class Database:
             for row in results:
                 processed_row = {}
                 for col in text_columns:
-                    if col in row and row[col]:
-                        processed_row[col] = str(row[col])
+                    try:
+                        if col in row and row[col] is not None:
+                            processed_row[col] = str(row[col])
+                    except Exception as e:
+                        logger.error(f"Error processing column {col}: {e}")
                 if processed_row:
                     processed_row['_table'] = table_name
-                    processed_row['_timestamp'] = str(row[timestamp_field])
+                    try:
+                        processed_row['_timestamp'] = str(row[timestamp_field])
+                    except Exception as e:
+                        logger.error(f"Error processing timestamp field {timestamp_field}: {e}")
                     if user_id:
                         processed_row['_user_id'] = user_id
                     processed_results.append(processed_row)
@@ -332,25 +343,73 @@ class Database:
                     pass
     
     def fetch_user_profile(self, user_id: str) -> Optional[Dict]:
-        """获取用户个人信息"""
+        """获取用户个人信息（同时检查普通用户和管理员）"""
         conn = None
         cursor = None
         try:
+            # 检查用户ID是否有效
+            if not user_id or user_id == 'anonymous':
+                logger.warning(f"Invalid user ID: {user_id}")
+                return None
+            
+            # 检查是否为管理员token（admin_前缀）
+            if user_id.startswith('admin_'):
+                logger.info(f"Admin token detected: {user_id}")
+                # 返回一个默认的管理员信息
+                return {
+                    'id': user_id,
+                    'nickname': '管理员',
+                    'phone': None,
+                    'avatar': None,
+                    'city': None,
+                    'province': None,
+                    'user_type': 'admin'
+                }
+            
             conn = self.connect()
             cursor = conn.cursor(cursor_factory=DictCursor)
             
+            # 先检查普通用户表
             query = f"""
                 SELECT id, nickname, phone_hidden as phone, avatar, city, province 
                 FROM {settings.DB_SCHEMA}.ums_member 
-                WHERE id = %s
             """
-            cursor.execute(query, (user_id,))
-            result = cursor.fetchone()
-            if result:
-                logger.info(f"Fetched profile for user {user_id}")
-            else:
-                logger.warning(f"No profile found for user {user_id}")
-            return result
+            
+            cursor.execute(query)
+            members = cursor.fetchall()
+            
+            # 尝试找到匹配的用户
+            for member in members:
+                # 检查ID是否匹配
+                if str(member['id']) == user_id:
+                    logger.info(f"Fetched profile for user {user_id} from ums_member by ID")
+                    # 将DictCursor对象转换为普通字典
+                    member_dict = dict(member)
+                    member_dict['user_type'] = 'member'
+                    return member_dict
+            
+            # 如果普通用户表中没有，检查管理员表
+            query = f"""
+                SELECT user_id as id, nick_name as nickname, phonenumber as phone 
+                FROM {settings.DB_SCHEMA}.sys_user 
+            """
+            
+            cursor.execute(query)
+            admins = cursor.fetchall()
+            
+            # 尝试找到匹配的管理员
+            for admin in admins:
+                # 检查ID是否匹配
+                if str(admin['id']) == user_id:
+                    logger.info(f"Fetched profile for user {user_id} from sys_user by ID")
+                    # 将DictCursor对象转换为普通字典
+                    admin_dict = dict(admin)
+                    admin_dict['user_type'] = 'admin'
+                    return admin_dict
+            
+            # 如果都没有找到
+            logger.warning(f"No profile found for user {user_id}")
+            return None
         except Exception as e:
             logger.error(f"Error fetching user profile: {e}")
             return None
@@ -366,23 +425,183 @@ class Database:
                 except:
                     pass
     
-    def fetch_all_faqs(self) -> List[Dict]:
+    def fetch_all_faqs(self, page: int = 1, size: int = 10, keyword: str = None) -> List[Dict]:
         try:
-            # 数据库中没有faq表，返回空结果
-            logger.info("No FAQ table found in database, returning empty results")
-            return []
+            conn = self.connect()
+            cursor = conn.cursor(cursor_factory=DictCursor)
+            try:
+                # 构建查询
+                query = f"""
+                    SELECT id, question, answer, category, sort, status, create_time
+                    FROM {settings.DB_SCHEMA}.faq
+                    WHERE status = 1
+                """
+                params = []
+                
+                # 添加搜索条件
+                if keyword:
+                    query += " AND (question ILIKE %s OR answer ILIKE %s OR category ILIKE %s)"
+                    params.extend([f"%{keyword}%", f"%{keyword}%", f"%{keyword}%"])
+                
+                # 添加排序
+                query += " ORDER BY id DESC"
+                
+                # 添加分页
+                offset = (page - 1) * size
+                query += " LIMIT %s OFFSET %s"
+                params.extend([size, offset])
+                
+                cursor.execute(query, params)
+                results = cursor.fetchall()
+                # 将DictCursor对象转换为普通字典
+                faqs = [dict(faq) for faq in results]
+                logger.info(f"Fetched {len(faqs)} FAQs (page {page}, size {size})")
+                return faqs
+            finally:
+                cursor.close()
+                conn.close()
         except Exception as e:
             logger.error(f"Error fetching FAQs: {e}")
             return []
     
+    def count_faqs(self, keyword: str = None) -> int:
+        try:
+            conn = self.connect()
+            cursor = conn.cursor()
+            try:
+                # 构建查询
+                query = f"""
+                    SELECT COUNT(*)
+                    FROM {settings.DB_SCHEMA}.faq
+                    WHERE status = 1
+                """
+                params = []
+                
+                # 添加搜索条件
+                if keyword:
+                    query += " AND (question ILIKE %s OR answer ILIKE %s OR category ILIKE %s)"
+                    params.extend([f"%{keyword}%", f"%{keyword}%", f"%{keyword}%"])
+                
+                cursor.execute(query, params)
+                result = cursor.fetchone()
+                count = result[0] if result else 0
+                logger.info(f"Counted {count} FAQs")
+                return count
+            finally:
+                cursor.close()
+                conn.close()
+        except Exception as e:
+            logger.error(f"Error counting FAQs: {e}")
+            return 0
+    
     def fetch_faq_by_id(self, faq_id: int) -> Optional[Dict]:
         try:
-            # 数据库中没有faq表，返回空结果
-            logger.info("No FAQ table found in database, returning empty results")
-            return None
+            conn = self.connect()
+            cursor = conn.cursor(cursor_factory=DictCursor)
+            try:
+                cursor.execute(f"""
+                    SELECT id, question, answer, category, sort, status, create_time
+                    FROM {settings.DB_SCHEMA}.faq
+                    WHERE id = %s
+                """, (faq_id,))
+                result = cursor.fetchone()
+                if result:
+                    # 将DictCursor对象转换为普通字典
+                    faq = dict(result)
+                    logger.info(f"Fetched FAQ with id: {faq_id}")
+                    return faq
+                logger.info(f"No FAQ found with id: {faq_id}")
+                return None
+            finally:
+                cursor.close()
+                conn.close()
         except Exception as e:
             logger.error(f"Error fetching FAQ by id: {e}")
             return None
+    
+    def create_faq(self, faq: Dict) -> bool:
+        """创建FAQ"""
+        try:
+            conn = self.connect()
+            cursor = conn.cursor()
+            try:
+                cursor.execute(f"""
+                    INSERT INTO {settings.DB_SCHEMA}.faq 
+                    (question, answer, category, sort, status, create_by, create_time, update_by, update_time) 
+                    VALUES (%s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP, %s, CURRENT_TIMESTAMP)
+                """, (
+                    faq.get('question'),
+                    faq.get('answer'),
+                    faq.get('category'),
+                    faq.get('sort', 0),
+                    faq.get('status', 1),
+                    faq.get('create_by'),
+                    faq.get('update_by')
+                ))
+                conn.commit()
+                logger.info(f"Created FAQ: {faq.get('question')}")
+                return True
+            finally:
+                cursor.close()
+                conn.close()
+        except Exception as e:
+            logger.error(f"Error creating FAQ: {e}")
+            return False
+    
+    def update_faq(self, faq_id: int, faq: Dict) -> bool:
+        """更新FAQ"""
+        try:
+            conn = self.connect()
+            cursor = conn.cursor()
+            try:
+                cursor.execute(f"""
+                    UPDATE {settings.DB_SCHEMA}.faq 
+                    SET question = %s, 
+                        answer = %s, 
+                        category = %s, 
+                        sort = %s, 
+                        status = %s, 
+                        update_by = %s, 
+                        update_time = CURRENT_TIMESTAMP
+                    WHERE id = %s
+                """, (
+                    faq.get('question'),
+                    faq.get('answer'),
+                    faq.get('category'),
+                    faq.get('sort', 0),
+                    faq.get('status', 1),
+                    faq.get('update_by'),
+                    faq_id
+                ))
+                conn.commit()
+                logger.info(f"Updated FAQ with id: {faq_id}")
+                return True
+            finally:
+                cursor.close()
+                conn.close()
+        except Exception as e:
+            logger.error(f"Error updating FAQ: {e}")
+            return False
+    
+    def delete_faq(self, faq_id: int) -> bool:
+        """删除FAQ"""
+        try:
+            conn = self.connect()
+            cursor = conn.cursor()
+            try:
+                cursor.execute(f"""
+                    DELETE FROM {settings.DB_SCHEMA}.faq 
+                    WHERE id = %s
+                """, (faq_id,))
+                conn.commit()
+                logger.info(f"Deleted FAQ with id: {faq_id}")
+                return True
+            finally:
+                cursor.close()
+                conn.close()
+        except Exception as e:
+            logger.error(f"Error deleting FAQ: {e}")
+            return False
     
     def get_ai_config(self, config_key: str) -> Optional[str]:
         """从数据库获取AI配置"""

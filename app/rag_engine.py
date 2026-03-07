@@ -70,25 +70,39 @@ class MultiTableRAGEngine:
                 tables = ['faq']
             
             for table_name in tables:
-                if table_name in settings.VECTOR_TABLE_CONFIG:
-                    text_columns = settings.VECTOR_TABLE_CONFIG[table_name]
-                else:
-                    columns_info = db.get_table_columns(table_name)
-                    text_columns = [
-                        col['column_name'] 
-                        for col in columns_info 
-                        if 'text' in col['data_type'].lower() or 
-                           'char' in col['data_type'].lower() or
-                           'varchar' in col['data_type'].lower()
-                    ]
-                
-                if text_columns:
-                    # 传递用户ID进行数据过滤
-                    data = db.fetch_table_data(table_name, text_columns, user_id=user_id)
-                    if data:
-                        multi_vector_store.add_table_data(table_name, data, text_columns)
-                    # 记录初始化时间作为上次更新时间
-                    self.last_update_times[table_name] = self.datetime.datetime.now().isoformat()
+                try:
+                    logger.info(f"Processing table: {table_name}")
+                    if table_name in settings.VECTOR_TABLE_CONFIG:
+                        text_columns = settings.VECTOR_TABLE_CONFIG[table_name]
+                        logger.info(f"Using configured columns for {table_name}: {text_columns}")
+                    else:
+                        columns_info = db.get_table_columns(table_name)
+                        text_columns = [
+                            col['column_name'] 
+                            for col in columns_info 
+                            if 'text' in col['data_type'].lower() or 
+                               'char' in col['data_type'].lower() or
+                               'varchar' in col['data_type'].lower() or
+                               'numeric' in col['data_type'].lower() or
+                               'integer' in col['data_type'].lower()
+                        ]
+                        logger.info(f"Auto-detected columns for {table_name}: {text_columns}")
+                    
+                    if text_columns:
+                        # 传递用户ID进行数据过滤
+                        logger.info(f"Fetching data from {table_name} with columns: {text_columns}")
+                        data = db.fetch_table_data(table_name, text_columns, user_id=user_id)
+                        logger.info(f"Fetched {len(data)} records from {table_name}")
+                        if data:
+                            logger.info(f"Adding {len(data)} records from {table_name} to vector store")
+                            multi_vector_store.add_table_data(table_name, data, text_columns)
+                        # 记录初始化时间作为上次更新时间
+                        self.last_update_times[table_name] = self.datetime.datetime.now().isoformat()
+                    else:
+                        logger.warning(f"No valid columns found for table {table_name}")
+                except Exception as e:
+                    logger.error(f"Error processing table {table_name}: {e}")
+                    continue
             
             self._initialized = True
             stats = multi_vector_store.get_all_stats()
@@ -187,39 +201,175 @@ class MultiTableRAGEngine:
         except Exception:
             question = ""
         
+        # 检查是否是简短的确认词
+        confirmation_words = ['是', '对', '是的', '对的', '没错', '正确', '恩', '嗯']
+        original_question = question
+        
+        # 如果是确认词，尝试从对话历史中获取之前的完整问题
+        if question in confirmation_words and user_id:
+            history = self.get_conversation_history(user_id)
+            # 查找用户之前的问题
+            for msg in reversed(history):
+                if msg['role'] == 'user' and msg['content'] not in confirmation_words:
+                    question = msg['content']
+                    logger.info(f"Using previous question '{question}' instead of confirmation word '{original_question}'")
+                    break
+        
         # 添加用户问题到对话历史
-        self.add_to_history(user_id, "user", question)
+        self.add_to_history(user_id, "user", original_question)
         
         question_lower = question.lower()
+        
+        # 特殊处理用户数量和所有用户信息查询
+        user_count_keywords = ['有多少用户', '用户数量', '所有用户', '用户列表', '用户信息']
+        if any(keyword in question for keyword in user_count_keywords):
+            # 从ums_member表获取所有用户信息
+            from app.database import db
+            from app.config import settings
+            
+            # 构建查询
+            text_columns = settings.VECTOR_TABLE_CONFIG.get('ums_member', ['nickname', 'phone_hidden', 'city', 'province'])
+            all_users = db.fetch_table_data('ums_member', text_columns)
+            
+            if all_users:
+                # 构建用户信息列表
+                user_list = []
+                for user in all_users:
+                    user_info = []
+                    if 'nickname' in user and user['nickname']:
+                        user_info.append(f"昵称: {user['nickname']}")
+                    if 'phone_hidden' in user and user['phone_hidden']:
+                        user_info.append(f"电话: {user['phone_hidden']}")
+                    if 'city' in user and user['city']:
+                        user_info.append(f"城市: {user['city']}")
+                    if 'province' in user and user['province']:
+                        user_info.append(f"省份: {user['province']}")
+                    if user_info:
+                        user_list.append('; '.join(user_info))
+                
+                # 构建回答
+                count = len(user_list)
+                if count > 0:
+                    answer = f"商城共有 {count} 个用户，他们的信息如下：\n"
+                    for i, user_info in enumerate(user_list, 1):
+                        answer += f"{i}. {user_info}\n"
+                else:
+                    answer = "商城目前没有用户。"
+            else:
+                answer = "抱歉，无法获取用户信息。"
+            
+            result = {
+                "answer": answer,
+                "confidence": 1.0,
+                "matched_question": None,
+                "faq_id": None,
+                "source": "用户列表",
+                "url": None,
+                "table": "ums_member"
+            }
+            self.add_to_history(user_id, "assistant", result.get("answer", ""))
+            return result
+        
+        # 特殊处理"我是谁"这类问题
+        who_am_i_keywords = ['我是谁', '我是', '我的信息', '个人信息', '我的资料']
+        if any(keyword in question for keyword in who_am_i_keywords):
+            if user_id:
+                # 如果有用户ID，直接获取用户信息
+                from app.database import db
+                user_profile = db.fetch_user_profile(user_id)
+                if user_profile:
+                    # 构建用户信息回答
+                    nickname = user_profile.get('nickname', '未知用户')
+                    phone = user_profile.get('phone', '未知')
+                    city = user_profile.get('city', '未知')
+                    province = user_profile.get('province', '未知')
+                    user_type = user_profile.get('user_type', 'member')
+                    
+                    if user_type == 'admin':
+                        answer = f"您是管理员{nickname}，"
+                    else:
+                        answer = f"您是{nickname}，"
+                    
+                    if phone:
+                        answer += f"电话{phone}，"
+                    if city or province:
+                        answer += f"来自{province}{city}。"
+                    else:
+                        answer += "这是您的个人信息。"
+                    
+                    result = {
+                        "answer": answer,
+                        "confidence": 1.0,
+                        "matched_question": None,
+                        "faq_id": None,
+                        "source": "用户信息",
+                        "url": None,
+                        "table": "ums_member"
+                    }
+                    self.add_to_history(user_id, "assistant", result.get("answer", ""))
+                    return result
+                else:
+                    answer = "抱歉，未找到您的个人信息。请确保您已登录系统。"
+            else:
+                answer = "抱歉，我无法回答这个问题。请先登录系统，登录后我可以告诉您的个人信息。"
+            
+            result = {
+                "answer": answer,
+                "confidence": 0.8,
+                "matched_question": None,
+                "faq_id": None,
+                "source": "系统提示",
+                "url": None,
+                "table": None
+            }
+            self.add_to_history(user_id, "assistant", result.get("answer", ""))
+            return result
         
         # 优化意图识别关键词
         query_keywords = ['哪些', '所有', '列表', '全部', '有什么', '有哪些', '多少', '几个', '查询', '查看']
         is_query_type = any(keyword in question for keyword in query_keywords)
         
-        # 优化表选择逻辑
-        customer_keywords = ['用户', '客户', '购买者', '消费者', '我', '我的信息', '个人信息', '账号', '个人资料', '会员信息', '注册信息', '登录信息', '我的账号', '我的会员']
-        order_keywords = ['订单', '购买', '交易', '配送', '发货', '我的订单', '物流', '快递', '买过', '购买记录', '历史订单', '订单状态', '订单详情', '我的购买', '购买历史', '已购', '买了什么', '买了哪些', '购买过什么', '购买过哪些', '订单查询', '查订单', '查看订单', '订单列表', '所有订单', '全部订单']
-        product_keywords = ['商品', '产品', '物品', '货物', '库存', '商品信息', '购买商品', '商品详情', '产品信息', '商品价格', '产品价格', '商品库存', '产品库存', '商品规格', '产品规格', '商品属性', '产品属性', '商品分类', '产品分类']
-        address_keywords = ['地址', '收货地址', '我的地址', '地址管理', '收货信息', '地址列表', '添加地址', '修改地址', '删除地址', '默认地址', '地址详情', '我的收货地址']
-        payment_keywords = ['支付', '付款', '账单', '退款', '退换货', '支付方式', '付款方式', '支付失败', '付款失败', '退款申请', '退款流程', '退款状态', '退换货流程', '退换货政策', '退款到账', '退款时间']
-        
+        # 根据表关键词选择相关的表
         target_tables = None
-        if any(keyword in question for keyword in order_keywords):
-            target_tables = ['oms_order']
-        elif any(keyword in question for keyword in payment_keywords):
-            target_tables = ['oms_order']
-        elif any(keyword in question for keyword in customer_keywords):
-            target_tables = ['ums_member']
-        elif any(keyword in question for keyword in product_keywords):
-            target_tables = ['pms_product']
-        elif any(keyword in question for keyword in address_keywords):
-            target_tables = ['ums_member_address']
-        else:
-            # 默认搜索用户和订单表
-            target_tables = ['ums_member', 'oms_order']
-        
         if tables:
+            # 如果用户指定了表，直接使用
             target_tables = tables
+        else:
+            # 检查用户是否为管理员
+            is_admin = False
+            if user_id:
+                from app.database import db
+                user_profile = db.fetch_user_profile(user_id)
+                if user_profile and user_profile.get('user_type') == 'admin':
+                    is_admin = True
+            
+            if is_admin:
+                # 管理员可以访问所有表
+                from app.config import settings
+                target_tables = settings.VECTOR_TABLES
+                logger.info(f"Admin user {user_id} accessing all tables: {target_tables}")
+            else:
+                # 普通用户根据关键词匹配
+                from app.config import settings
+                matched_tables = []
+                
+                # 遍历所有配置的表及其关键词
+                for table_name, keywords in settings.VECTOR_TABLE_KEYWORDS.items():
+                    # 检查问题中是否包含该表的关键词
+                    if any(keyword in question for keyword in keywords):
+                        matched_tables.append(table_name)
+                
+                # 对于商品相关的查询，即使没有匹配到关键词，也添加pms_product表
+                product_related_keywords = ['商品', '产品', '货物', '库存', '价格', '品牌', '类别', '商品详情', '产品信息']
+                if any(keyword in question for keyword in product_related_keywords):
+                    if 'pms_product' not in matched_tables:
+                        matched_tables.append('pms_product')
+                
+                # 如果没有匹配的表，使用默认表，包括商品表
+                if not matched_tables:
+                    matched_tables = ['ums_member', 'oms_order', 'pms_product']
+                
+                target_tables = matched_tables
         
         logger.info(f"Processing question: '{question}' with tables: {target_tables}")
         
@@ -251,39 +401,111 @@ class MultiTableRAGEngine:
         except Exception:
             question = ""
         
+        # 检查是否是简短的确认词
+        confirmation_words = ['是', '对', '是的', '对的', '没错', '正确', '恩', '嗯']
+        original_question = question
+        
+        # 如果是确认词，尝试从对话历史中获取之前的完整问题
+        if question in confirmation_words and user_id:
+            history = self.get_conversation_history(user_id)
+            # 查找用户之前的问题
+            for msg in reversed(history):
+                if msg['role'] == 'user' and msg['content'] not in confirmation_words:
+                    question = msg['content']
+                    logger.info(f"Using previous question '{question}' instead of confirmation word '{original_question}'")
+                    break
+        
         # 添加用户问题到对话历史
-        self.add_to_history(user_id, "user", question)
+        self.add_to_history(user_id, "user", original_question)
         
         question_lower = question.lower()
+        
+        # 特殊处理"我是谁"这类问题
+        who_am_i_keywords = ['我是谁', '我是', '我的信息', '个人信息', '我的资料']
+        if any(keyword in question for keyword in who_am_i_keywords):
+            if user_id:
+                # 如果有用户ID，直接获取用户信息
+                from app.database import db
+                user_profile = db.fetch_user_profile(user_id)
+                if user_profile:
+                    # 构建用户信息回答
+                    nickname = user_profile.get('nickname', '未知用户')
+                    phone = user_profile.get('phone', '未知')
+                    city = user_profile.get('city', '未知')
+                    province = user_profile.get('province', '未知')
+                    user_type = user_profile.get('user_type', 'member')
+                    
+                    if user_type == 'admin':
+                        answer = f"您是管理员{nickname}，"
+                    else:
+                        answer = f"您是{nickname}，"
+                    
+                    if phone:
+                        answer += f"电话{phone}，"
+                    if city or province:
+                        answer += f"来自{province}{city}。"
+                    else:
+                        answer += "这是您的个人信息。"
+                else:
+                    answer = "抱歉，未找到您的个人信息。请确保您已登录系统。"
+            else:
+                answer = "抱歉，我无法回答这个问题。请先登录系统，登录后我可以告诉您的个人信息。"
+            
+            # 添加助手回答到对话历史
+            self.add_to_history(user_id, "assistant", answer)
+            
+            # 流式返回回答
+            yield {
+                "text": answer,
+                "done": True
+            }
+            return
         
         # 优化意图识别关键词
         query_keywords = ['哪些', '所有', '列表', '全部', '有什么', '有哪些', '多少', '几个', '查询', '查看']
         is_query_type = any(keyword in question for keyword in query_keywords)
         
-        # 优化表选择逻辑
-        customer_keywords = ['用户', '客户', '购买者', '消费者', '我', '我的信息', '个人信息', '账号', '个人资料', '会员信息', '注册信息', '登录信息', '我的账号', '我的会员']
-        order_keywords = ['订单', '购买', '交易', '配送', '发货', '我的订单', '物流', '快递', '买过', '购买记录', '历史订单', '订单状态', '订单详情', '我的购买', '购买历史', '已购', '买了什么', '买了哪些', '购买过什么', '购买过哪些', '订单查询', '查订单', '查看订单', '订单列表', '所有订单', '全部订单']
-        product_keywords = ['商品', '产品', '物品', '货物', '库存', '商品信息', '购买商品', '商品详情', '产品信息', '商品价格', '产品价格', '商品库存', '产品库存', '商品规格', '产品规格', '商品属性', '产品属性', '商品分类', '产品分类']
-        address_keywords = ['地址', '收货地址', '我的地址', '地址管理', '收货信息', '地址列表', '添加地址', '修改地址', '删除地址', '默认地址', '地址详情', '我的收货地址']
-        payment_keywords = ['支付', '付款', '账单', '退款', '退换货', '支付方式', '付款方式', '支付失败', '付款失败', '退款申请', '退款流程', '退款状态', '退换货流程', '退换货政策', '退款到账', '退款时间']
-        
+        # 根据表关键词选择相关的表
         target_tables = None
-        if any(keyword in question for keyword in order_keywords):
-            target_tables = ['oms_order']
-        elif any(keyword in question for keyword in payment_keywords):
-            target_tables = ['oms_order']
-        elif any(keyword in question for keyword in customer_keywords):
-            target_tables = ['ums_member']
-        elif any(keyword in question for keyword in product_keywords):
-            target_tables = ['pms_product']
-        elif any(keyword in question for keyword in address_keywords):
-            target_tables = ['ums_member_address']
-        else:
-            # 默认搜索用户和订单表
-            target_tables = ['ums_member', 'oms_order']
-        
         if tables:
+            # 如果用户指定了表，直接使用
             target_tables = tables
+        else:
+            # 检查用户是否为管理员
+            is_admin = False
+            if user_id:
+                from app.database import db
+                user_profile = db.fetch_user_profile(user_id)
+                if user_profile and user_profile.get('user_type') == 'admin':
+                    is_admin = True
+            
+            if is_admin:
+                # 管理员可以访问所有表
+                from app.config import settings
+                target_tables = settings.VECTOR_TABLES
+                logger.info(f"Admin user {user_id} accessing all tables: {target_tables}")
+            else:
+                # 普通用户根据关键词匹配
+                from app.config import settings
+                matched_tables = []
+                
+                # 遍历所有配置的表及其关键词
+                for table_name, keywords in settings.VECTOR_TABLE_KEYWORDS.items():
+                    # 检查问题中是否包含该表的关键词
+                    if any(keyword in question for keyword in keywords):
+                        matched_tables.append(table_name)
+                
+                # 对于商品相关的查询，即使没有匹配到关键词，也添加pms_product表
+                product_related_keywords = ['商品', '产品', '货物', '库存', '价格', '品牌', '类别', '商品详情', '产品信息']
+                if any(keyword in question for keyword in product_related_keywords):
+                    if 'pms_product' not in matched_tables:
+                        matched_tables.append('pms_product')
+                
+                # 如果没有匹配的表，使用默认表，包括商品表
+                if not matched_tables:
+                    matched_tables = ['ums_member', 'oms_order', 'pms_product']
+                
+                target_tables = matched_tables
         
         logger.info(f"Processing stream question: '{question}' with tables: {target_tables}")
         
@@ -763,12 +985,18 @@ class MultiTableRAGEngine:
                 brand_name = result.get('brand_name', '')
                 product_category_name = result.get('product_category_name', '')
                 detail_html = result.get('detail_html', '')
+                price = result.get('price', '')
+                unit = result.get('unit', '')
                 
                 parts = []
                 if brand_name:
                     parts.append(f"品牌 {brand_name}")
                 if product_category_name:
                     parts.append(f"类别 {product_category_name}")
+                if price:
+                    parts.append(f"价格 {price}元")
+                if unit:
+                    parts.append(f"单位 {unit}")
                 if detail_html:
                     # 提取纯文本并截断
                     import re
@@ -780,6 +1008,38 @@ class MultiTableRAGEngine:
                     return f"{name}：{', '.join(parts)}"
                 elif name:
                     return name
+                else:
+                    return '未找到相关信息'
+            elif table_name == 'pms_sku':
+                out_sku_id = result.get('out_sku_id', '')
+                price = result.get('price', '')
+                stock = result.get('stock', '')
+                sp_data = result.get('sp_data', '')
+                
+                parts = []
+                if price:
+                    parts.append(f"价格 {price}元")
+                if stock:
+                    parts.append(f"库存 {stock}件")
+                if sp_data:
+                    # 尝试解析sp_data（通常是JSON格式）
+                    try:
+                        import json
+                        sp_info = json.loads(sp_data)
+                        if isinstance(sp_info, dict):
+                            sp_parts = []
+                            for key, value in sp_info.items():
+                                sp_parts.append(f"{key}: {value}")
+                            if sp_parts:
+                                parts.append(f"规格: {', '.join(sp_parts)}")
+                    except:
+                        # 如果解析失败，直接显示原始数据
+                        parts.append(f"规格: {sp_data}")
+                
+                if out_sku_id and parts:
+                    return f"SKU {out_sku_id}：{', '.join(parts)}"
+                elif parts:
+                    return '、'.join(parts)
                 else:
                     return '未找到相关信息'
             else:

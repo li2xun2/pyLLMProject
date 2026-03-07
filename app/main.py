@@ -31,7 +31,7 @@ def get_user_id_from_token(token: str) -> str:
         logger.info(f"Token payload without verification: {payload}")
         
         # 尝试从多个可能的字段中获取用户ID
-        user_id = payload.get("memberId") or payload.get("sub") or payload.get("userId") or payload.get("id") or payload.get("login_member_key")
+        user_id = payload.get("memberId") or payload.get("sub") or payload.get("userId") or payload.get("id")
         if user_id:
             logger.info(f"Found user ID: {user_id}")
             return str(user_id)
@@ -39,12 +39,19 @@ def get_user_id_from_token(token: str) -> str:
         # 尝试验证签名
         try:
             verified_payload = jwt.decode(token, JWT_SECRET_KEY, algorithms=[JWT_ALGORITHM])
-            user_id = verified_payload.get("memberId") or verified_payload.get("sub") or verified_payload.get("userId") or verified_payload.get("id") or verified_payload.get("login_member_key")
+            user_id = verified_payload.get("memberId") or verified_payload.get("sub") or verified_payload.get("userId") or verified_payload.get("id")
             if user_id:
                 logger.info(f"Verified user ID: {user_id}")
                 return str(user_id)
         except Exception as verify_error:
             logger.warning(f"Signature verification failed but continuing with extracted user ID: {verify_error}")
+        
+        # 如果是管理员token，只包含login_user_key（UUID），不包含用户ID
+        # 这种情况下，我们无法直接获取用户ID，返回一个特殊标识
+        if "login_user_key" in payload:
+            logger.info(f"Found admin token with login_user_key: {payload['login_user_key']}")
+            # 返回admin_前缀加上UUID，以便后续处理
+            return f"admin_{payload['login_user_key']}"
         
         raise ValueError("User ID not found in token")
     except Exception as e:
@@ -387,13 +394,15 @@ async def get_ai_config():
         from app.config import settings
         return {
             "vector_tables": settings.VECTOR_TABLES,
-            "vector_table_config": settings.VECTOR_TABLE_CONFIG
+            "vector_table_config": settings.VECTOR_TABLE_CONFIG,
+            "vector_table_keywords": settings.VECTOR_TABLE_KEYWORDS
         }
     except Exception as e:
         logger.error(f"Error getting AI config: {e}")
         return {
             "vector_tables": [],
-            "vector_table_config": {}
+            "vector_table_config": {},
+            "vector_table_keywords": {}
         }
 
 
@@ -414,10 +423,13 @@ async def update_ai_config(config: dict, user_id: str = Depends(get_optional_use
             settings.VECTOR_TABLES = config["vector_tables"]
         if "vector_table_config" in config:
             settings.VECTOR_TABLE_CONFIG = config["vector_table_config"]
+        if "vector_table_keywords" in config:
+            settings.VECTOR_TABLE_KEYWORDS = config["vector_table_keywords"]
         
         # 保存配置到数据库
         db.save_ai_config("vector_tables", json.dumps(settings.VECTOR_TABLES))
         db.save_ai_config("vector_table_config", json.dumps(settings.VECTOR_TABLE_CONFIG))
+        db.save_ai_config("vector_table_keywords", json.dumps(settings.VECTOR_TABLE_KEYWORDS))
         
         # 重新初始化RAG引擎
         from app.rag_engine import rag_engine
@@ -457,3 +469,136 @@ async def get_table_columns(table_name: str):
     except Exception as e:
         logger.error(f"Error getting table columns: {e}")
         return {"columns": []}
+
+
+@app.get("/api/ai/faqs")
+async def get_faqs(page: int = 1, size: int = 10, keyword: str = None):
+    """获取所有FAQ，支持分页和搜索"""
+    try:
+        faqs = db.fetch_all_faqs(page=page, size=size, keyword=keyword)
+        total = db.count_faqs(keyword=keyword)
+        return {"faqs": faqs, "total": total}
+    except Exception as e:
+        logger.error(f"Error getting FAQs: {e}")
+        return {"faqs": [], "total": 0}
+
+
+@app.get("/ai/faqs")
+async def ai_faqs(page: int = 1, size: int = 10, keyword: str = None):
+    """获取所有FAQ，兼容前端代理路径"""
+    return await get_faqs(page, size, keyword)
+
+
+@app.get("/api/ai/faqs/{faq_id}")
+async def get_faq(faq_id: int):
+    """获取单个FAQ"""
+    try:
+        faq = db.fetch_faq_by_id(faq_id)
+        return {"faq": faq}
+    except Exception as e:
+        logger.error(f"Error getting FAQ: {e}")
+        return {"faq": None}
+
+
+@app.get("/ai/faqs/{faq_id}")
+async def ai_get_faq(faq_id: int):
+    """获取单个FAQ，兼容前端代理路径"""
+    return await get_faq(faq_id)
+
+
+@app.post("/api/ai/faqs")
+async def create_faq(faq: dict, user_id: str = Depends(get_optional_user_id)):
+    """创建FAQ"""
+    try:
+        logger.info(f"Creating FAQ requested by user: {user_id or 'anonymous'}")
+        # 添加创建者和更新者信息
+        faq['create_by'] = user_id
+        faq['update_by'] = user_id
+        # 调用数据库操作方法
+        success = db.create_faq(faq)
+        if success:
+            return {
+                "status": "success",
+                "message": "FAQ创建成功"
+            }
+        else:
+            return {
+                "status": "error",
+                "message": "FAQ创建失败"
+            }
+    except Exception as e:
+        logger.error(f"Error creating FAQ: {e}")
+        return {
+            "status": "error",
+            "message": f"创建失败: {str(e)}"
+        }
+
+
+@app.post("/ai/faqs")
+async def ai_create_faq(faq: dict, user_id: str = Depends(get_optional_user_id)):
+    """创建FAQ，兼容前端代理路径"""
+    return await create_faq(faq, user_id)
+
+
+@app.put("/api/ai/faqs/{faq_id}")
+async def update_faq(faq_id: int, faq: dict, user_id: str = Depends(get_optional_user_id)):
+    """更新FAQ"""
+    try:
+        logger.info(f"Updating FAQ {faq_id} requested by user: {user_id or 'anonymous'}")
+        # 添加更新者信息
+        faq['update_by'] = user_id
+        # 调用数据库操作方法
+        success = db.update_faq(faq_id, faq)
+        if success:
+            return {
+                "status": "success",
+                "message": "FAQ更新成功"
+            }
+        else:
+            return {
+                "status": "error",
+                "message": "FAQ更新失败"
+            }
+    except Exception as e:
+        logger.error(f"Error updating FAQ: {e}")
+        return {
+            "status": "error",
+            "message": f"更新失败: {str(e)}"
+        }
+
+
+@app.put("/ai/faqs/{faq_id}")
+async def ai_update_faq(faq_id: int, faq: dict, user_id: str = Depends(get_optional_user_id)):
+    """更新FAQ，兼容前端代理路径"""
+    return await update_faq(faq_id, faq, user_id)
+
+
+@app.delete("/api/ai/faqs/{faq_id}")
+async def delete_faq(faq_id: int, user_id: str = Depends(get_optional_user_id)):
+    """删除FAQ"""
+    try:
+        logger.info(f"Deleting FAQ {faq_id} requested by user: {user_id or 'anonymous'}")
+        # 调用数据库操作方法
+        success = db.delete_faq(faq_id)
+        if success:
+            return {
+                "status": "success",
+                "message": "FAQ删除成功"
+            }
+        else:
+            return {
+                "status": "error",
+                "message": "FAQ删除失败"
+            }
+    except Exception as e:
+        logger.error(f"Error deleting FAQ: {e}")
+        return {
+            "status": "error",
+            "message": f"删除失败: {str(e)}"
+        }
+
+
+@app.delete("/ai/faqs/{faq_id}")
+async def ai_delete_faq(faq_id: int, user_id: str = Depends(get_optional_user_id)):
+    """删除FAQ，兼容前端代理路径"""
+    return await delete_faq(faq_id, user_id)
