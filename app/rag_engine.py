@@ -373,8 +373,21 @@ class MultiTableRAGEngine:
         
         logger.info(f"Processing question: '{question}' with tables: {target_tables}")
         
+        # 优先搜索FAQ表，确保所有问题先查FAQ确认不是常见问题
+        faq_priority_results = multi_vector_store.search(question, tables=['faq'], top_k=3) if 'faq' in settings.VECTOR_TABLES else []
+        
+        faq_matched = False
+        faq_answer = None
+        if faq_priority_results:
+            # FAQ表中有匹配结果，使用FAQ的回答
+            faq_result, faq_confidence, faq_table = faq_priority_results[0]
+            if faq_confidence >= settings.CONFIDENCE_THRESHOLD:
+                faq_answer = self._format_answer(faq_result, faq_table)
+                faq_matched = True
+                logger.info(f"FAQ match found: confidence={faq_confidence}, question={faq_result.get('question', faq_result.get('name', ''))}")
+        
         if settings.USE_LLM:
-            result = self._ask_with_llm(question, target_tables, is_query_type, user_id)
+            result = self._ask_with_llm(question, target_tables, is_query_type, user_id, faq_matched=faq_matched, faq_answer=faq_answer, faq_results=faq_priority_results)
         else:
             result = self._ask_without_llm(question, target_tables, is_query_type, user_id)
         
@@ -508,6 +521,33 @@ class MultiTableRAGEngine:
                 target_tables = matched_tables
         
         logger.info(f"Processing stream question: '{question}' with tables: {target_tables}")
+        
+        # 优先搜索FAQ表，确保所有问题先查FAQ确认不是常见问题
+        faq_priority_results = multi_vector_store.search(question, tables=['faq'], top_k=3) if 'faq' in settings.VECTOR_TABLES else []
+        
+        faq_matched = False
+        faq_answer = None
+        if faq_priority_results:
+            # FAQ表中有匹配结果，使用FAQ的回答
+            faq_result, faq_confidence, faq_table = faq_priority_results[0]
+            if faq_confidence >= settings.CONFIDENCE_THRESHOLD:
+                faq_answer = self._format_answer(faq_result, faq_table)
+                faq_matched = True
+                logger.info(f"FAQ match found in stream: confidence={faq_confidence}, question={faq_result.get('question', faq_result.get('name', ''))}")
+        
+        # 如果FAQ匹配且置信度足够，直接使用FAQ答案
+        if faq_matched and faq_answer and faq_priority_results:
+            faq_result, faq_confidence, faq_table = faq_priority_results[0]
+            matched_question = faq_result.get('question') or faq_result.get('name', '')
+            answer = faq_answer
+            
+            self.add_to_history(user_id, "assistant", answer)
+            
+            yield {
+                "text": answer,
+                "done": True
+            }
+            return
         
         if settings.USE_LLM:
             async for chunk in self._ask_with_llm_stream(question, target_tables, is_query_type, user_id):
@@ -650,7 +690,7 @@ class MultiTableRAGEngine:
             # 添加助手回答到对话历史
             self.add_to_history(user_id, "assistant", formatted_answer)
     
-    def _ask_with_llm(self, question: str, target_tables: List[str], is_query_type: bool, user_id: Optional[str] = None) -> Dict:
+    def _ask_with_llm(self, question: str, target_tables: List[str], is_query_type: bool, user_id: Optional[str] = None, faq_matched: bool = False, faq_answer: str = None, faq_results: List = None) -> Dict:
         """使用LLM处理问题，确保正确编码"""
         # 如果提供了user_id，并且查询涉及用户相关表，确保使用用户特定数据
         if user_id:
@@ -658,6 +698,23 @@ class MultiTableRAGEngine:
             user_related_tables = ['orders', 'customers', 'member_address']
             if any(table in target_tables for table in user_related_tables):
                 logger.info(f"Processing user-specific query for user {user_id}")
+        
+        # 如果FAQ匹配且置信度足够，直接使用FAQ答案
+        if faq_matched and faq_answer and faq_results:
+            faq_result, faq_confidence, faq_table = faq_results[0]
+            logger.info(f"Using FAQ answer due to high confidence match: {faq_confidence}")
+            
+            matched_question = faq_result.get('question') or faq_result.get('name', '')
+            
+            return {
+                "answer": faq_answer,
+                "confidence": faq_confidence,
+                "matched_question": matched_question,
+                "faq_id": faq_result.get('id'),
+                "source": "常见问题",
+                "url": faq_result.get('url'),
+                "table": "faq"
+            }
         
         # 搜索相关信息
         results = multi_vector_store.search(question, tables=target_tables, top_k=5)  # 增加搜索结果数量
@@ -898,7 +955,14 @@ class MultiTableRAGEngine:
     def _format_answer(self, result: Dict, table_name: str) -> str:
         """格式化回答，确保正确编码"""
         try:
-            if table_name == 'ums_member':
+            if table_name == 'faq':
+                answer = result.get('answer', '')
+                if answer:
+                    # 直接返回回答内容，去掉字段名前缀
+                    return answer.strip()
+                else:
+                    return '未找到相关信息'
+            elif table_name == 'ums_member':
                 nickname = result.get('nickname', '')
                 phone = result.get('phone_hidden', '')
                 city = result.get('city', '')

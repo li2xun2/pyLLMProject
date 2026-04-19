@@ -15,7 +15,8 @@ class Database:
     
     def connect(self):
         try:
-            logger.debug(f"Connecting to database: {settings.DB_HOST}:{settings.DB_PORT}/{settings.DB_NAME}")
+            logger.info(f"Connecting to database: {settings.DB_HOST}:{settings.DB_PORT}/{settings.DB_NAME}")
+            logger.info(f"User: {settings.DB_USER}, Schema: {settings.DB_SCHEMA}")
             connection = psycopg2.connect(
                 host=settings.DB_HOST,
                 port=settings.DB_PORT,
@@ -24,10 +25,12 @@ class Database:
                 password=settings.DB_PASSWORD,
                 options="-c client_encoding=utf8"
             )
-            logger.debug("Database connection successful")
+            logger.info("Database connection successful")
             return connection
         except Exception as e:
-            logger.error(f"Database connection failed: {e}")
+            logger.error(f"Database connection failed: {type(e).__name__}: {str(e)}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
             raise
     
     def _create_config_table(self):

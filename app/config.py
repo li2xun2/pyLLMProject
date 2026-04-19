@@ -11,20 +11,21 @@ class Settings(BaseSettings):
     DB_PASSWORD: str = "123456"
     DB_SCHEMA: str = "mall"
     
-    EMBEDDING_MODEL: str = "C:/Users/lix/.cache/huggingface/hub/models--BAAI--bge-small-zh-v1.5/snapshots/7999e1d3359715c523056ef9478215996d62a620"
+    EMBEDDING_MODEL: str = "C:/Users/20462/.cache/huggingface/hub/models--BAAI--bge-small-zh-v1.5/snapshots/7999e1d3359715c523056ef9478215996d62a620"
     EMBEDDING_DEVICE: str = "cuda"
     TOP_K: int = 3
     CONFIDENCE_THRESHOLD: float = 0.5
     
-    LLM_MODEL: str = "C:/Users/lix/.cache/huggingface/hub/models--Qwen--Qwen2.5-1.5B-Instruct/snapshots/989aa7980e4cf806f80c7fef2b1adb7bc71aa306"
+    LLM_MODEL: str = "C:/Users/20462/.cache/huggingface/hub/models--Qwen--Qwen2.5-1.5B-Instruct/snapshots/989aa7980e4cf806f80c7fef2b1adb7bc71aa306"
     LLM_DEVICE: str = "cuda"
     LLM_MAX_LENGTH: int = 512
     LLM_TEMPERATURE: float = 0.7
     USE_LLM: bool = True
     
     # 默认值
-    _default_vector_tables: List[str] = ['ums_member', 'oms_order', 'ums_member_address', 'pms_product', 'pms_sku']
+    _default_vector_tables: List[str] = ['faq', 'ums_member', 'oms_order', 'ums_member_address', 'pms_product', 'pms_sku']
     _default_vector_table_config: Dict[str, List[str]] = {
+        'faq': ['question', 'answer', 'category', 'keywords'],
         'ums_member': ['nickname', 'phone_hidden', 'city', 'province'],
         'oms_order': ['order_sn', 'status', 'receiver_name', 'total_amount'],
         'ums_member_address': ['name', 'phone_hidden', 'province', 'city', 'district', 'detail_address'],
@@ -33,6 +34,7 @@ class Settings(BaseSettings):
         'pms_sku': ['out_sku_id', 'price', 'pic', 'stock', 'sp_data']
     }
     _default_vector_table_keywords: Dict[str, List[str]] = {
+        'faq': ['常见问题', 'FAQ', '帮助', '如何', '怎么', '怎样', '退款', '退货', '换货', '支付', '配送', '运费', '发票', '售后', '客服', '联系', '问题', '流程'],
         'ums_member': ['用户', '会员', '个人信息', '账号', '登录', '注册', '个人资料', '我的信息'],
         'oms_order': ['订单', '购买', '交易', '支付', '物流', '发货', '收货', '订单状态', '订单详情'],
         'ums_member_address': ['地址', '收货地址', '我的地址', '地址管理', '收货信息'],
